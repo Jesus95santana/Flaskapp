@@ -1,0 +1,93 @@
+name: CI to AWS EC2
+
+on: [push, workflow_dispatch]
+
+env:
+  SSH_KEY: ${{ secrets.SSH_KEY }}
+  AWS_HOST: ${{ secrets.AWS_HOST }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.8'
+
+    - name: Install dependencies
+      run: |
+        python -m venv venv
+        source venv/bin/activate
+        python -m pip install --upgrade pip
+        pip install flask pytest flake8
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    - name: List installed packages (debugging)
+      run: |
+        source venv/bin/activate
+        pip freeze
+
+    - name: Lint with flake8
+      run: |
+        source venv/bin/activate
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127
+
+    - name: Run tests
+      run: |
+        source venv/bin/activate
+        pytest
+
+    - name: Deploy to AWS
+      uses: appleboy/scp-action@master
+      with:
+        host: ${{ env.AWS_HOST }}
+        username: ec2-user
+        key: ${{ env.SSH_KEY }}
+        port: 22
+        source: "."
+        target: "/home/ec2-user/FlaskApp"
+
+    - name: Setup and Start Flask Application
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ env.AWS_HOST }}
+        username: ec2-user
+        key: ${{ env.SSH_KEY }}
+        script: |
+          cd /home/ec2-user/FlaskApp
+          # Ensure Python and pip are installed
+          sudo yum install -y python3 python3-pip
+          # Create or ensure virtual environment
+          python3 -m venv venv
+          source venv/bin/activate
+          # Install dependencies directly on server
+          pip install --upgrade pip
+          pip install flask pytest flake8
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Start Flask application
+          export FLASK_APP=app.py
+          nohup flask run --host=0.0.0.0 --port=5000 > flask.log 2>&1 &
+
+    - name: Output Flask Log
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ env.AWS_HOST }}
+        username: ec2-user
+        key: ${{ env.SSH_KEY }}
+        script: |
+          cat /home/ec2-user/FlaskApp/flask.log
+
+    - name: Test Flask Availability
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ env.AWS_HOST }}
+        username: ec2-user
+        key: ${{ env.SSH_KEY }}
+        script: |
+          sleep 10  # Increased sleep for server startup time
+          set -e  # Exit immediately if any command fails
+          curl --fail --silent --show-error http://${{ env.AWS_HOST }}:5000/ || exit 1
